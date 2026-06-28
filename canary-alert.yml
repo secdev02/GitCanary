@@ -1,0 +1,77 @@
+# .github/workflows/canary-alert.yml
+#
+# Receives a repository_dispatch event from the canary-smudge hook and opens
+# a GitHub issue recording what was accessed, by whom, and from where.
+#
+# Trigger: POST /repos/{owner}/{repo}/dispatches
+#   { "event_type": "canary_triggered",
+#     "client_payload": { "file": "...", "user": "...", "host": "...", "ts": "...", "event": "..." } }
+
+name: Canary Alert
+
+on:
+  repository_dispatch:
+    types: [canary_triggered]
+
+jobs:
+  open-issue:
+    name: Open tracking issue
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+
+    steps:
+      - name: Create canary issue
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const payload = context.payload.client_payload;
+
+            const title = `[CANARY] ${payload.file} accessed`;
+
+            const body = [
+              '## Canary File Accessed',
+              '',
+              '| Field | Value |',
+              '|---|---|',
+              `| **File** | \`${payload.file}\` |`,
+              `| **Event** | \`${payload.event}\` |`,
+              `| **User** | \`${payload.user}\` |`,
+              `| **Host** | \`${payload.host}\` |`,
+              `| **Timestamp** | \`${payload.ts}\` |`,
+              '',
+              '### What this means',
+              '',
+              'A git materialisation operation (`checkout`, `restore`, `clone`, `pull`, or `stash pop`)',
+              'caused git to write this decoy file from the object store to the working tree.',
+              'The smudge filter intercepted the operation and dispatched this alert.',
+              '',
+              '### Recommended actions',
+              '',
+              '1. Identify whether `' + payload.user + '@' + payload.host + '` is an authorised machine.',
+              '2. Check `.git/canary/access.log` on that machine for the full access sequence.',
+              '3. Review recent git operations on that machine: `git reflog`, `git log`.',
+              '4. If unauthorised — rotate any real credentials that share naming with the decoy files.',
+              '',
+              '---',
+              '_Opened automatically by the canary-smudge hook._'
+            ].join('\n');
+
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              title: title,
+              body:  body,
+              labels: ['canary', 'security']
+            });
+
+            core.summary
+              .addHeading('Canary issue opened')
+              .addTable([
+                [{ data: 'Field', header: true }, { data: 'Value', header: true }],
+                ['File',      payload.file],
+                ['User',      payload.user],
+                ['Host',      payload.host],
+                ['Timestamp', payload.ts]
+              ])
+              .write();

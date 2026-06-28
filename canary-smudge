@@ -1,0 +1,70 @@
+#!/bin/sh
+# canary-smudge <filename>
+# Place at: .git/hooks/canary-smudge
+#
+# Fires per-file whenever git writes content from the object store to disk.
+# Triggered by: git checkout, git restore, git clone, git pull, git stash pop.
+#
+# stdin  = raw file content from git object store
+# stdout = content written to working tree (passed through unchanged)
+
+FILE="$1"
+GIT_DIR=$(git rev-parse --git-dir 2>/dev/null || echo '.git')
+LOG="$GIT_DIR/canary/access.log"
+TS=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+EVENT="SMUDGE"
+
+# Cross-platform user + host
+# id -un works on Linux / macOS / Git Bash on Windows
+# USERNAME fallback covers native Windows shell environments
+WHO=$(id -un 2>/dev/null)
+[ -z "$WHO" ] && WHO=${USERNAME:-${USER:-unknown}}
+HOST=$(hostname 2>/dev/null || echo 'unknown')
+
+mkdir -p "$GIT_DIR/canary"
+
+# ── 1. Local log ──────────────────────────────────────────────────────────────
+printf '%s\t%s\t%s@%s\t%s\n' "$TS" "$EVENT" "$WHO" "$HOST" "$FILE" >> "$LOG"
+
+# ── 2. GitHub repository_dispatch ────────────────────────────────────────────
+# Requires: git config canary.githubToken 'ghp_...'
+#           git config canary.githubRepo  'owner/repo'
+# curl ships with Git for Windows, Linux, and macOS — no extra dependency.
+
+GH_TOKEN=$(git config --get canary.githubToken 2>/dev/null)
+GH_REPO=$(git config --get canary.githubRepo   2>/dev/null)
+
+if [ -n "$GH_TOKEN" ] && [ -n "$GH_REPO" ]; then
+  PAYLOAD=$(printf \
+    '{"event_type":"canary_triggered","client_payload":{"file":"%s","user":"%s","host":"%s","ts":"%s","event":"%s"}}' \
+    "$FILE" "$WHO" "$HOST" "$TS" "$EVENT")
+
+  curl -sf \
+    -X POST \
+    -H "Authorization: token $GH_TOKEN" \
+    -H "Accept: application/vnd.github.v3+json" \
+    -H "Content-Type: application/json" \
+    -d "$PAYLOAD" \
+    "https://api.github.com/repos/$GH_REPO/dispatches" \
+    >/dev/null 2>&1 &
+fi
+
+# ── 3. Optional plain webhook (Slack, custom endpoint, etc.) ─────────────────
+WEBHOOK=$(git config --get canary.webhookUrl 2>/dev/null)
+if [ -n "$WEBHOOK" ]; then
+  WH_BODY=$(printf \
+    '{"event":"%s","file":"%s","user":"%s","host":"%s","ts":"%s"}' \
+    "$EVENT" "$FILE" "$WHO" "$HOST" "$TS")
+
+  curl -sf \
+    -X POST \
+    -H "Content-Type: application/json" \
+    -d "$WH_BODY" \
+    "$WEBHOOK" \
+    >/dev/null 2>&1 &
+fi
+
+# ── 4. Pass file content through unchanged ────────────────────────────────────
+# The file that lands on disk is byte-for-byte what is in the object store.
+# The attacker sees normal-looking content with no indication the alert fired.
+cat
